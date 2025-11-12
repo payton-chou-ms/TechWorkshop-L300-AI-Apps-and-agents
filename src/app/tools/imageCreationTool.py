@@ -3,13 +3,14 @@ import requests
 from io import BytesIO
 from PIL import Image
 from azure.storage.blob import BlobServiceClient, ContentSettings
+from azure.identity import DefaultAzureCredential
 import os
 from dotenv import load_dotenv
 from uuid import uuid4
 
 load_dotenv()
 
-blob_connection_string = os.getenv("blob_connection_string", "")
+# Use Azure Identity instead of connection string
 storage_account_name = os.getenv("storage_account_name", "")
 container_name = os.getenv("storage_container_name", "")
 # NOTE: These environment variables should be set in your .env file
@@ -39,7 +40,10 @@ def create_image(text, image_url):
             pil_image.save(img_byte_arr, format='PNG')
             img_byte_arr.seek(0)
 
-            blob_service_client = BlobServiceClient.from_connection_string(blob_connection_string)
+            # Use DefaultAzureCredential for authentication
+            account_url = f"https://{storage_account_name}.blob.core.windows.net"
+            credential = DefaultAzureCredential()
+            blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
             container_client = blob_service_client.get_container_client(container_name)
 
             blob_name = f"image_{uuid4().hex}.png"
