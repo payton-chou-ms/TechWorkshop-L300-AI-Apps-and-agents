@@ -68,7 +68,7 @@ def get_chat_completion_service(
 
 
 def _get_azure_openai_chat_completion_service() -> AzureChatCompletion:
-    """Return Azure OpenAI chat completion service with managed identity.
+    """Return Azure OpenAI chat completion service with Azure AD authentication.
 
     Returns:
         AzureChatCompletion: The configured Azure OpenAI service.
@@ -76,7 +76,6 @@ def _get_azure_openai_chat_completion_service() -> AzureChatCompletion:
     endpoint = os.getenv('gpt_endpoint')
     deployment_name = os.getenv('gpt_deployment')
     api_version = os.getenv('gpt_api_version')
-    api_key = os.getenv('gpt_api_key')
 
     if not endpoint:
         raise ValueError("gpt_endpoint is required")
@@ -89,35 +88,25 @@ def _get_azure_openai_chat_completion_service() -> AzureChatCompletion:
     if '/openai/deployments/' in endpoint:
         endpoint = endpoint.split('/openai/deployments/')[0]
 
-    # Use managed identity if no API key is provided
-    if not api_key:
-        # Create Azure credential for managed identity
-        credential = DefaultAzureCredential()
-        token_provider = get_bearer_token_provider(
-            credential, "https://cognitiveservices.azure.com/.default"
-        )
-        
-        # Create OpenAI client with managed identity
-        async_client = openai.AsyncAzureOpenAI(
-            azure_endpoint=endpoint,
-            azure_ad_token_provider=token_provider,
-            api_version=api_version,
-        )
-        
-        return AzureChatCompletion(
-            service_id=service_id,
-            deployment_name=deployment_name,
-            async_client=async_client,
-        )
-    else:
-        # Fallback to API key authentication for local development
-        return AzureChatCompletion(
-            service_id=service_id,
-            deployment_name=deployment_name,
-            endpoint=endpoint,
-            api_key=api_key,
-            api_version=api_version,
-        )
+    # Always use Azure AD authentication (DefaultAzureCredential)
+    # Key-based authentication is disabled for this resource
+    credential = DefaultAzureCredential()
+    token_provider = get_bearer_token_provider(
+        credential, "https://cognitiveservices.azure.com/.default"
+    )
+    
+    # Create OpenAI client with Azure AD authentication
+    async_client = openai.AsyncAzureOpenAI(
+        azure_endpoint=endpoint,
+        azure_ad_token_provider=token_provider,
+        api_version=api_version,
+    )
+    
+    return AzureChatCompletion(
+        service_id=service_id,
+        deployment_name=deployment_name,
+        async_client=async_client,
+    )
 
 
 def _get_openai_chat_completion_service() -> OpenAIChatCompletion:
