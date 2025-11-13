@@ -125,6 +125,60 @@ def _get_openai_chat_completion_service() -> OpenAIChatCompletion:
 # endregion
 
 
+# region Plugin
+
+class ProductPlugin:
+    """Retrieve data from Zava's product catalog.
+
+    The Plugin is used by the `product_agent`.
+    """
+
+    @kernel_function(
+        description='Retrieves a set of products based on a natural language user query.'
+    )
+    def get_products(
+        self,
+        question: Annotated[
+            str, 'Natural language query to retrieve products, e.g. "What kinds of paint rollers do you have in stock?"'
+        ],
+    ) -> list[dict[str, Any]]:
+        try:
+            # Simulate product retrieval based on the question
+            # In a real implementation, this would query a database or external service
+            product_dict = [
+                {
+                    "id": "1",
+                    "name": "Eco-Friendly Paint Roller",
+                    "type": "Paint Roller",
+                    "description": "A high-quality, eco-friendly paint roller for smooth finishes.",
+                    "punchLine": "Roll with the best, paint with the rest!",
+                    "price": 15.99
+                },
+                {
+                    "id": "2",
+                    "name": "Premium Paint Brush Set",
+                    "type": "Paint Brush",
+                    "description": "A set of premium paint brushes for detailed work and fine finishes.",
+                    "punchLine": "Brush up your skills with our premium set!",
+                    "price": 25.49
+                },
+                {
+                    "id": "3",
+                    "name": "All-Purpose Paint Tray",
+                    "type": "Paint Tray",
+                    "description": "A durable paint tray suitable for all types of rollers and brushes.",
+                    "punchLine": "Tray it, paint it, love it!",
+                    "price": 9.99
+                }
+            ]
+            return product_dict
+        except Exception as e:
+            return f'Product recommendation failed: {e!s}'
+
+
+# endregion
+
+
 # region Response Format
 
 
@@ -152,6 +206,41 @@ class SemanticKernelProductManagementAgent:
         # Configure the chat completion service explicitly
         chat_service = get_chat_completion_service(ChatServices.AZURE_OPENAI)
 
+        # Define a ProductAgent to handle product-related queries
+        product_agent = ChatCompletionAgent(
+            service=chat_service,
+            name='ProductAgent',
+            instructions=(
+                'You specialize in handling product-related requests from customers and employees. '
+                'This includes providing a list of products, identifying available quantities, '
+                'providing product prices, and giving product descriptions as they exist in the product catalog. '
+                'Your goal is to assist customers promptly and accurately with all product-related inquiries.'
+            ),
+            plugins=[ProductPlugin()],
+        )
+
+        # Define a MarketingAgent to handle marketing-related tasks
+        marketing_agent = ChatCompletionAgent(
+            service=chat_service,
+            name='MarketingAgent',
+            instructions=(
+                'You specialize in planning and recommending marketing strategies for products. '
+                'This includes identifying target audiences, making product descriptions better, and suggesting promotional tactics. '
+                'Your goal is to help businesses effectively market their products and reach their desired customers.'
+            ),
+        )
+
+        # Define a RankerAgent to handle ranking and recommendations
+        ranker_agent = ChatCompletionAgent(
+            service=chat_service,
+            name='RankerAgent',
+            instructions=(
+                'You specialize in ranking and recommending products based on various criteria. '
+                'This includes analyzing product features, customer reviews, and market trends to provide tailored suggestions. '
+                'Your goal is to help customers find the best products for their needs.'
+            ),
+        )
+
         # Define the main ProductManagerAgent to delegate tasks to the appropriate agents
         self.agent = ChatCompletionAgent(
             service=chat_service,
@@ -167,7 +256,7 @@ class SemanticKernelProductManagementAgent:
                 "Be friendly, professional, and provide helpful product information and recommendations. "
                 "If you don't have specific product data, provide general helpful guidance about home improvement products and encourage users to check with store staff for detailed product information."
             ),
-            plugins=[],
+            plugins=[product_agent, marketing_agent, ranker_agent],
             arguments=KernelArguments(
                 settings=OpenAIChatPromptExecutionSettings(
                     temperature=0.7,
