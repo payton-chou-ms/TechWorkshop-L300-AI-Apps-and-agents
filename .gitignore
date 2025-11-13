@@ -54,5 +54,4 @@ out/
 *.azuredevops
 
 # Github
-.github/
 .vscode/settings.json

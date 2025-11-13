@@ -7,7 +7,6 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 import os
 from dotenv import load_dotenv
-from azure.identity.aio import DefaultAzureCredential
 from collections import deque
 from typing import Deque, Tuple, Optional, Dict
 import orjson
@@ -20,9 +19,7 @@ from azure.monitor.opentelemetry import configure_azure_monitor
 
 # Semantic Kernel imports
 from semantic_kernel.agents import (
-    Agent,
-    AzureAIAgent,
-    AzureAIAgentSettings,
+    ChatCompletionAgent,
     HandoffOrchestration,
     OrchestrationHandoffs,
 )
@@ -34,6 +31,12 @@ from semantic_kernel.contents import (
     FunctionResultContent,
 )
 from semantic_kernel.functions import kernel_function
+from semantic_kernel.connectors.ai.open_ai import AzureChatCompletion
+from semantic_kernel.connectors.ai.open_ai.prompt_execution_settings.azure_chat_prompt_execution_settings import (
+    AzureChatPromptExecutionSettings,
+)
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+import openai
 
 # Import utilities
 from utils.env_utils import load_env_vars, validate_env_vars
@@ -167,8 +170,36 @@ class CustomerLoyaltyPlugin:
 
 # ==================== Agent Setup ====================
 
-async def setup_agents(client) -> tuple[list[Agent], OrchestrationHandoffs, dict]:
+async def setup_agents() -> tuple[list[ChatCompletionAgent], OrchestrationHandoffs, dict]:
     """Setup Zava shopping assistant agents with handoff orchestration."""
+    
+    # Configure Azure OpenAI service - use gpt_endpoint for direct OpenAI access
+    endpoint = os.getenv('gpt_endpoint')
+    deployment = os.getenv('gpt_deployment', 'gpt-4.1')
+    api_version = os.getenv('gpt_api_version', '2024-12-01-preview')
+    
+    if not endpoint:
+        raise ValueError("gpt_endpoint environment variable is required")
+    
+    # Extract base endpoint if full URL provided
+    if '/openai/deployments/' in endpoint:
+        endpoint = endpoint.split('/openai/deployments/')[0]
+    
+    # Always use Azure AD authentication
+    credential = DefaultAzureCredential()
+    token_provider = get_bearer_token_provider(
+        credential, "https://cognitiveservices.azure.com/.default"
+    )
+    async_client = openai.AsyncAzureOpenAI(
+        azure_endpoint=endpoint,
+        azure_ad_token_provider=token_provider,
+        api_version=api_version,
+    )
+    
+    chat_service = AzureChatCompletion(
+        async_client=async_client,
+        deployment_name=deployment,
+    )
     
     # Load prompts
     prompts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'prompts')
@@ -193,130 +224,33 @@ async def setup_agents(client) -> tuple[list[Agent], OrchestrationHandoffs, dict
     loyalty_plugin = CustomerLoyaltyPlugin()
     
     # 1. Cora - Main shopper agent (greeting and general assistance)
-    cora_definition = await client.agents.create_agent(
-        model=AzureAIAgentSettings().model_deployment_name,
+    cora_agent = ChatCompletionAgent(
+        service=chat_service,
         name="Cora",
-        description="Main greeting and general shopping assistant for Zava",
         instructions=shopper_prompt,
-    )
-    cora_agent = AzureAIAgent(
-        client=client,
-        definition=cora_definition,
     )
     
     # 2. Interior Designer Agent (product recommendations and design advice)
-    interior_designer_definition = await client.agents.create_agent(
-        model=AzureAIAgentSettings().model_deployment_name,
+    interior_designer_agent = ChatCompletionAgent(
+        service=chat_service,
         name="InteriorDesigner",
-        description="Interior design expert providing product recommendations",
         instructions=interior_designer_prompt,
-        tools=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "ProductSearchPlugin-search_products",
-                    "description": "Search for products based on user query",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "Search query for products"}
-                        },
-                        "required": ["query"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "ImageAnalysisPlugin-analyze_image",
-                    "description": "Analyze an image and return description",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "image_url": {"type": "string", "description": "URL of the image to analyze"}
-                        },
-                        "required": ["image_url"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "ImageCreationPlugin-create_room_image",
-                    "description": "Create an image for interior design",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "description": {"type": "string", "description": "Description of the desired image"},
-                            "reference_image_url": {"type": "string", "description": "Optional reference image URL"}
-                        },
-                        "required": ["description"],
-                    },
-                },
-            },
-        ],
-    )
-    interior_designer_agent = AzureAIAgent(
-        client=client,
-        definition=interior_designer_definition,
         plugins=[product_search_plugin, image_analysis_plugin, image_creation_plugin],
     )
     
     # 3. Customer Loyalty Agent (discounts and promotions)
-    loyalty_definition = await client.agents.create_agent(
-        model=AzureAIAgentSettings().model_deployment_name,
+    loyalty_agent = ChatCompletionAgent(
+        service=chat_service,
         name="CustomerLoyalty",
-        description="Customer loyalty and discount specialist",
         instructions=loyalty_prompt,
-        tools=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "CustomerLoyaltyPlugin-calculate_discount",
-                    "description": "Calculate customer discount based on customer ID",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "customer_id": {"type": "string", "description": "Customer ID"}
-                        },
-                        "required": ["customer_id"],
-                    },
-                },
-            }
-        ],
-    )
-    loyalty_agent = AzureAIAgent(
-        client=client,
-        definition=loyalty_definition,
         plugins=[loyalty_plugin],
     )
     
     # 4. Inventory Agent (stock checking and availability)
-    inventory_definition = await client.agents.create_agent(
-        model=AzureAIAgentSettings().model_deployment_name,
+    inventory_agent = ChatCompletionAgent(
+        service=chat_service,
         name="Inventory",
-        description="Inventory and stock availability specialist",
         instructions=inventory_prompt,
-        tools=[
-            {
-                "type": "function",
-                "function": {
-                    "name": "ProductSearchPlugin-search_products",
-                    "description": "Search for products based on user query",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "Search query for products"}
-                        },
-                        "required": ["query"],
-                    },
-                },
-            }
-        ],
-    )
-    inventory_agent = AzureAIAgent(
-        client=client,
-        definition=inventory_definition,
         plugins=[product_search_plugin],
     )
     
@@ -376,9 +310,10 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.datetime.now().isoformat(),
         "framework": "semantic_kernel",
+        "orchestration": "ChatCompletionAgent with HandoffOrchestration",
         "environment_vars_configured": {
-            "azure_ai_agent_endpoint": bool(os.environ.get("AZURE_AI_AGENT_ENDPOINT")),
             "azure_openai_endpoint": bool(validated_env_vars.get('AZURE_OPENAI_ENDPOINT')),
+            "application_insights": bool(os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING")),
         }
     }
 
@@ -423,149 +358,138 @@ async def websocket_endpoint(websocket: WebSocket):
     plugins = None
     
     try:
-        async with DefaultAzureCredential() as creds:
-            async with AzureAIAgent.create_client(credential=creds) as client:
-                # Setup agents and orchestration
-                agents, handoffs, plugins = await setup_agents(client)
+        # Setup agents and orchestration
+        agents, handoffs, plugins = await setup_agents()
+        
+        # Create handoff orchestration
+        orchestration = HandoffOrchestration(
+            members=agents,
+            handoffs=handoffs,
+            agent_response_callback=agent_response_callback,
+        )
+        
+        # Create and start runtime
+        runtime = InProcessRuntime()
+        runtime.start()
+        
+        logger.info("Semantic Kernel orchestration initialized successfully")
+        
+        # Main message loop
+        try:
+            while True:
+                message_start_time = time.time()
                 
-                # Create handoff orchestration
-                orchestration = HandoffOrchestration(
-                    members=agents,
-                    handoffs=handoffs,
-                    agent_response_callback=agent_response_callback,
-                )
-                
-                # Create and start runtime
-                runtime = InProcessRuntime()
-                runtime.start()
-                
-                logger.info("Semantic Kernel orchestration initialized successfully")
-                
-                # Main message loop
                 try:
-                    while True:
-                        message_start_time = time.time()
-                        
-                        try:
-                            # Receive message from client
-                            data = await websocket.receive_text()
-                            parsed = orjson.loads(data)
-                            user_message = parsed.get("message", "")
-                            has_image = parsed.get("has_image", False)
-                            image_url = parsed.get("image_url", "")
-                            has_video = parsed.get("has_video", False)
-                            video_url = parsed.get("video_url", "")
-                            cart = parsed.get("cart", [])
-                            
-                            # Update persistent image URL
-                            if image_url:
-                                persistent_image_url = image_url
-                            
-                            # Update cart
-                            if cart:
-                                persistent_cart = cart
-                            
-                            logger.info(f"Received message: {user_message[:50]}...")
-                            
-                        except WebSocketDisconnect:
-                            logger.info("WebSocket connection terminated")
-                            break
-                        except Exception as e:
-                            logger.error(f"Error parsing message: {e}")
-                            continue
-                        
-                        # Build task with context
-                        task = user_message
-                        if has_image and image_url:
-                            task += f"\n[User provided image: {image_url}]"
-                        if has_video and video_url:
-                            task += f"\n[User provided video: {video_url}]"
-                        if customer_id:
-                            task += f"\n[Customer ID: {customer_id}]"
-                        if persistent_cart:
-                            task += f"\n[Current cart: {len(persistent_cart)} items]"
-                        
-                        # Clear collected messages
-                        collected_messages.clear()
-                        
-                        try:
-                            # Invoke orchestration with the task
-                            logger.debug(f"Invoking orchestration with task: {task[:100]}...")
-                            orchestration_result = await orchestration.invoke(
-                                task=task,
-                                runtime=runtime,
-                            )
-                            
-                            # Get the result
-                            final_result = await orchestration_result.get()
-                            
-                            # Extract the final response
-                            response_content = ""
-                            responding_agent = "Cora"
-                            
-                            if collected_messages:
-                                # Get the last user-facing message
-                                for msg in reversed(collected_messages):
-                                    if msg.get("content") and msg.get("role") == "AuthorRole.ASSISTANT":
-                                        response_content = msg["content"]
-                                        responding_agent = msg["agent"]
-                                        break
-                            
-                            if not response_content and final_result:
-                                response_content = str(final_result)
-                            
-                            if not response_content:
-                                response_content = "I'm here to help! How can I assist you today?"
-                            
-                            # Format response
-                            response = {
-                                "answer": response_content,
-                                "agent": responding_agent.lower(),
-                                "cart": persistent_cart,
-                                "products": "",
-                                "discount_percentage": "",
-                                "image_url": "",
-                                "additional_data": ""
-                            }
-                            
-                            # Send response
-                            await websocket.send_text(fast_json_dumps(response))
-                            
-                            # Update chat history
-                            chat_history.append(("user", user_message))
-                            chat_history.append(("bot", response_content))
-                            
-                            elapsed = time.time() - message_start_time
-                            logger.info(f"Message processed in {elapsed:.3f}s by {responding_agent}")
-                            
-                        except Exception as e:
-                            logger.error(f"Error during orchestration: {e}", exc_info=True)
-                            error_response = {
-                                "answer": "I apologize, but I encountered an error processing your request. Please try again.",
-                                "error": str(e),
-                                "agent": "system",
-                                "cart": persistent_cart
-                            }
-                            await websocket.send_text(fast_json_dumps(error_response))
-                
-                except WebSocketDisconnect:
-                    logger.info("Client disconnected")
-                except Exception as e:
-                    logger.error(f"WebSocket error: {e}", exc_info=True)
-                finally:
-                    # Cleanup runtime
-                    if runtime:
-                        await runtime.stop_when_idle()
-                        logger.info("Runtime stopped")
+                    # Receive message from client
+                    data = await websocket.receive_text()
+                    parsed = orjson.loads(data)
+                    user_message = parsed.get("message", "")
+                    has_image = parsed.get("has_image", False)
+                    image_url = parsed.get("image_url", "")
+                    has_video = parsed.get("has_video", False)
+                    video_url = parsed.get("video_url", "")
+                    cart = parsed.get("cart", [])
                     
-                    # Cleanup agents
-                    if agents:
-                        for agent in agents:
-                            try:
-                                await client.agents.delete_agent(agent.id)
-                                logger.debug(f"Deleted agent: {agent.name}")
-                            except Exception as e:
-                                logger.error(f"Error deleting agent {agent.name}: {e}")
+                    # Update persistent image URL
+                    if image_url:
+                        persistent_image_url = image_url
+                    
+                    # Update cart
+                    if cart:
+                        persistent_cart = cart
+                    
+                    logger.info(f"Received message: {user_message[:50]}...")
+                    
+                except WebSocketDisconnect:
+                    logger.info("WebSocket connection terminated")
+                    break
+                except Exception as e:
+                    logger.error(f"Error parsing message: {e}")
+                    continue
+                
+                # Build task with context
+                task = user_message
+                if has_image and image_url:
+                    task += f"\n[User provided image: {image_url}]"
+                if has_video and video_url:
+                    task += f"\n[User provided video: {video_url}]"
+                if customer_id:
+                    task += f"\n[Customer ID: {customer_id}]"
+                if persistent_cart:
+                    task += f"\n[Current cart: {len(persistent_cart)} items]"
+                
+                # Clear collected messages
+                collected_messages.clear()
+                
+                try:
+                    # Invoke orchestration with the task
+                    logger.debug(f"Invoking orchestration with task: {task[:100]}...")
+                    orchestration_result = await orchestration.invoke(
+                        task=task,
+                        runtime=runtime,
+                    )
+                    
+                    # Get the result
+                    final_result = await orchestration_result.get()
+                    
+                    # Extract the final response
+                    response_content = ""
+                    responding_agent = "Cora"
+                    
+                    if collected_messages:
+                        # Get the last user-facing message
+                        for msg in reversed(collected_messages):
+                            if msg.get("content") and msg.get("role") == "AuthorRole.ASSISTANT":
+                                response_content = msg["content"]
+                                responding_agent = msg["agent"]
+                                break
+                    
+                    if not response_content and final_result:
+                        response_content = str(final_result)
+                    
+                    if not response_content:
+                        response_content = "I'm here to help! How can I assist you today?"
+                    
+                    # Format response
+                    response = {
+                        "answer": response_content,
+                        "agent": responding_agent.lower(),
+                        "cart": persistent_cart,
+                        "products": "",
+                        "discount_percentage": "",
+                        "image_url": "",
+                        "additional_data": ""
+                    }
+                    
+                    # Send response
+                    await websocket.send_text(fast_json_dumps(response))
+                    
+                    # Update chat history
+                    chat_history.append(("user", user_message))
+                    chat_history.append(("bot", response_content))
+                    
+                    elapsed = time.time() - message_start_time
+                    logger.info(f"Message processed in {elapsed:.3f}s by {responding_agent}")
+                    
+                except Exception as e:
+                    logger.error(f"Error during orchestration: {e}", exc_info=True)
+                    error_response = {
+                        "answer": "I apologize, but I encountered an error processing your request. Please try again.",
+                        "error": str(e),
+                        "agent": "system",
+                        "cart": persistent_cart
+                    }
+                    await websocket.send_text(fast_json_dumps(error_response))
+            
+        except WebSocketDisconnect:
+            logger.info("Client disconnected")
+        except Exception as e:
+            logger.error(f"WebSocket error: {e}", exc_info=True)
+        finally:
+            # Cleanup runtime
+            if runtime:
+                await runtime.stop_when_idle()
+                logger.info("Runtime stopped")
     
     except Exception as e:
         logger.error(f"Session initialization error: {e}", exc_info=True)
